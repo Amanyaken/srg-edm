@@ -1,10 +1,3 @@
--- SRG Task B4: core ETL transformations (MySQL 8.0+)
--- STATUS: DESIGNED against the columns the brief describes. NOT run on the real
--- SRG files (not yet received) and not run on any database. Expect to adjust
--- column names after you see the real CSV headers. Run and fix before submitting.
--- Phone convention here follows the course notes: 256XXXXXXXXX (no plus sign).
--- If you keep this, also change "+256..." / "E.164" wording in the Word document.
-
 CREATE DATABASE IF NOT EXISTS srg_dw CHARACTER SET utf8mb4;
 USE srg_dw;
 
@@ -76,9 +69,12 @@ SELECT
     WHEN 'M' THEN 'M' WHEN 'MALE' THEN 'M'
     WHEN 'F' THEN 'F' WHEN 'FEMALE' THEN 'F'
     ELSE 'U' END AS gender,
-  COALESCE(STR_TO_DATE(r.dob_raw, '%Y-%m-%d'),
-           STR_TO_DATE(r.dob_raw, '%d/%m/%Y'),    -- assumption: day first
-           STR_TO_DATE(r.dob_raw, '%d-%m-%Y')) AS dob,
+  -- each format is guarded by a pattern so strict mode never sees a bad date
+  CASE
+    WHEN r.dob_raw REGEXP '^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$' THEN STR_TO_DATE(r.dob_raw, '%Y-%m-%d')
+    WHEN r.dob_raw REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$' THEN STR_TO_DATE(r.dob_raw, '%d/%m/%Y')  -- assumption: day first
+    WHEN r.dob_raw REGEXP '^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}$' THEN STR_TO_DATE(r.dob_raw, '%d-%m-%Y')
+    ELSE NULL END AS dob,
   initcap(r.district_raw) AS district,
   LOWER(TRIM(r.email_raw)) AS email,
   r.updated_at
@@ -146,7 +142,12 @@ SET d.valid_to = CURDATE() - INTERVAL 1 DAY, d.is_current = 0
 WHERE d.product_name <> s.product_name OR d.category <> s.category OR d.unit <> s.unit;
 -- Step B: insert a new current row for new or changed products
 INSERT INTO dim_product (product_code, product_name, category, unit, valid_from, valid_to, is_current)
-SELECT s.product_code, s.product_name, s.category, s.unit, CURDATE(), '9999-12-31', 1
+SELECT s.product_code, s.product_name, s.category, s.unit,
+       -- first-ever version starts in 1900 so older sales can still find it;
+       -- a changed product starts today, and the old row keeps the earlier history
+       IF(EXISTS (SELECT 1 FROM dim_product h WHERE h.product_code = s.product_code),
+          CURDATE(), '1900-01-01'),
+       '9999-12-31', 1
 FROM stg_products_clean s
 LEFT JOIN dim_product d ON d.product_code = s.product_code AND d.is_current = 1
 WHERE d.product_key IS NULL;
@@ -183,8 +184,10 @@ SELECT s.src_format, s.sale_id,
        (s.qty < 0)                              -- returns kept and flagged
 FROM stg_sales_raw s
 JOIN (SELECT src_format, sale_id,
-             COALESCE(STR_TO_DATE(sale_date_raw, '%Y-%m-%d'),
-                      STR_TO_DATE(sale_date_raw, '%d/%m/%Y')) AS sale_date
+             CASE
+               WHEN sale_date_raw REGEXP '^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$' THEN STR_TO_DATE(sale_date_raw, '%Y-%m-%d')
+               WHEN sale_date_raw REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$' THEN STR_TO_DATE(sale_date_raw, '%d/%m/%Y')
+               ELSE NULL END AS sale_date
       FROM stg_sales_raw) sd ON sd.src_format = s.src_format AND sd.sale_id = s.sale_id
 LEFT JOIN dim_customer c
   ON c.phone = CASE
